@@ -1,0 +1,439 @@
+#include "ooo_cpu.h"
+#include <bitset>
+
+#define BIMODAL_TABLE_SIZE 16384
+#define BIMODAL_PRIME 16381
+#define MAX_COUNTER 3
+int bimodal_table[NUM_CPUS][BIMODAL_TABLE_SIZE];
+
+
+//--------Tage Data Structs Begin-------------------
+
+#define TAGE_TABLE_SIZE 16384
+#define TAGE_PRIME 16381
+#define TAGE_COUNTER 3 //tage prediction counter
+#define U_COUNTER 3 //tage usefullness counter
+
+typedef struct {
+	
+	unsigned int pred;
+	uint64_t tag;
+	unsigned int uctr;
+
+} tage_entry;
+
+tage_entry tage_table_1[NUM_CPUS][TAGE_TABLE_SIZE];
+tage_entry tage_table_2[NUM_CPUS][TAGE_TABLE_SIZE];
+tage_entry tage_table_3[NUM_CPUS][TAGE_TABLE_SIZE];
+tage_entry tage_table_4[NUM_CPUS][TAGE_TABLE_SIZE];
+tage_entry tage_table_5[NUM_CPUS][TAGE_TABLE_SIZE];
+
+#define TAGE_HISTORY_MIN 50 //50, 61, 74, 90, 110
+#define TAGE_HISTORY_MAX 110
+
+std::bitset<TAGE_HISTORY_MAX> global_history;
+//uint128_t global_history[NUM_CPUS];
+unsigned int compressed_hist1;
+unsigned int compressed_hist2;
+unsigned int compressed_hist3;
+unsigned int compressed_hist4;
+unsigned int compressed_hist5;
+
+unsigned int pred = 0; //provider component
+unsigned int alt_pred = 0; //alternative provider component
+
+tage_entry *provider;
+tage_entry *alt_provider;
+
+
+//--------Tage Data Structs End-------------------
+
+
+void update_compressed_history(uint8_t taken){
+
+    int maska = (1 << 13) - 1;
+    int maskb = 1 << 13;
+    int mask1 = global_history[50] << (50 % 13);    
+    int mask2 = global_history[61] << (61 % 13);    
+    int mask3 = global_history[74] << (74 % 13);    
+    int mask4 = global_history[90] << (90 % 13);    
+    int mask5 = global_history[110] << (110 % 13);    
+
+    compressed_hist1 = (compressed_hist1 << 1) + global_history[0];
+    compressed_hist1 ^= ((compressed_hist1 & maskb) >> 13);
+    compressed_hist1 ^= mask1;
+    compressed_hist1 &= maska;
+    
+    compressed_hist2 = (compressed_hist2 << 1) + global_history[0];
+    compressed_hist2 ^= ((compressed_hist2 & maskb) >> 13);
+    compressed_hist2 ^= mask2;
+    compressed_hist2 &= maska;
+
+    compressed_hist3 = (compressed_hist3 << 1) + global_history[0];
+    compressed_hist3 ^= ((compressed_hist3 & maskb) >> 13);
+    compressed_hist3 ^= mask3;
+    compressed_hist3 &= maska;
+
+    compressed_hist4 = (compressed_hist4 << 1) + global_history[0];
+    compressed_hist4 ^= ((compressed_hist4 & maskb) >> 13);
+    compressed_hist4 ^= mask4;
+    compressed_hist4 &= maska;
+
+    compressed_hist5 = (compressed_hist5 << 1) + global_history[0];
+    compressed_hist5 ^= ((compressed_hist5 & maskb) >> 13);
+    compressed_hist5 ^= mask5;
+    compressed_hist5 &= maska;
+
+}
+
+unsigned int tage_table_hash(uint64_t ip, int table) {
+
+    unsigned int hash = 0;
+    unsigned int mask = (1<<14) - 1;
+	switch(table)
+    {
+        case 1: hash = (ip&mask)^compressed_hist1;
+                break;
+
+        case 2: hash = (ip&mask)^compressed_hist2;
+                break;
+
+        case 3: hash = (ip&mask)^compressed_hist3;
+                break;
+
+        case 4: hash = (ip&mask)^compressed_hist4;
+                break;
+
+        case 5: hash = (ip&mask)^compressed_hist5;
+                break;
+	}
+        hash = hash % TAGE_PRIME;
+        return hash;
+}
+
+
+void O3_CPU::initialize_branch_predictor()
+{
+    cout << "CPU " << cpu << " TAGE branch predictor" << endl;
+
+    for(int i = 0; i < BIMODAL_TABLE_SIZE; i++)
+        bimodal_table[cpu][i] = 0;
+
+    for(int i = 0; i < TAGE_TABLE_SIZE; i++){
+        tage_table_1[cpu][i].pred = 0;
+        tage_table_1[cpu][i].tag = 0;
+        tage_table_1[cpu][i].uctr = 0;
+	
+        tage_table_2[cpu][i].pred = 0;
+        tage_table_2[cpu][i].tag = 0;
+        tage_table_2[cpu][i].uctr = 0;
+	
+        tage_table_3[cpu][i].pred = 0;
+        tage_table_3[cpu][i].tag = 0;
+        tage_table_3[cpu][i].uctr = 0;
+
+        tage_table_4[cpu][i].pred = 0;
+        tage_table_4[cpu][i].tag = 0;
+        tage_table_4[cpu][i].uctr = 0;
+
+        tage_table_5[cpu][i].pred = 0;
+        tage_table_5[cpu][i].tag = 0;
+        tage_table_5[cpu][i].uctr = 0;
+
+	}
+
+    compressed_hist1 = 0;
+    compressed_hist2 = 0;
+    compressed_hist3 = 0;
+    compressed_hist4 = 0;
+    compressed_hist5 = 0;
+    
+    cout << "CPU " << cpu << " TAGE branch predictor initialization done" << endl;
+    cout << "Table 1 pred, tag, uctr values = " << tage_table_1[cpu][0].pred  << ", " << tage_table_1[cpu][0].tag << ", " << tage_table_1[cpu][0].uctr << endl;
+    cout << "history initialization check, global_history " << global_history << endl;
+
+}
+
+uint8_t O3_CPU::predict_branch(uint64_t ip)
+{
+    uint32_t hash_base = ip % BIMODAL_PRIME;
+    uint8_t base_prediction = (bimodal_table[cpu][hash_base] >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    
+    pred = 0;
+    uint8_t tage_prediction;
+    uint32_t hash_tage5 = tage_table_hash(ip, 5);
+    uint32_t hash_tage4 = tage_table_hash(ip, 4);
+    uint32_t hash_tage3 = tage_table_hash(ip, 3);
+    uint32_t hash_tage2 = tage_table_hash(ip, 2);
+    uint32_t hash_tage1 = tage_table_hash(ip, 1);
+    if(tage_table_5[cpu][hash_tage5].tag == ip) {
+        pred = 5;
+        tage_prediction = (tage_table_5[cpu][hash_tage5].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    } else if (tage_table_4[cpu][hash_tage4].tag == ip) {
+        pred = 4;
+        tage_prediction = (tage_table_4[cpu][hash_tage4].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    } else if (tage_table_3[cpu][hash_tage3].tag == ip) {
+        pred = 3;
+        tage_prediction = (tage_table_3[cpu][hash_tage3].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    } else if (tage_table_2[cpu][hash_tage2].tag == ip) {
+        pred = 2;
+        tage_prediction = (tage_table_2[cpu][hash_tage2].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    } else if (tage_table_1[cpu][hash_tage1].tag == ip) {
+        pred = 1;
+        tage_prediction = (tage_table_1[cpu][hash_tage1].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+    }
+
+    if(pred > 0) {
+        switch(pred)
+        {
+            case 5: alt_pred = (tage_table_4[cpu][hash_tage4].tag == ip) ? 4 : ( (tage_table_3[cpu][hash_tage3].tag == ip) ? 3 : ( (tage_table_2[cpu][hash_tage2].tag == ip) ? 2 : ( (tage_table_1[cpu][hash_tage1].tag == ip) ? 1 : 0)));
+                    break;
+            case 4: alt_pred = (tage_table_3[cpu][hash_tage3].tag == ip) ? 3 : ( (tage_table_2[cpu][hash_tage2].tag == ip) ? 2 : ( (tage_table_1[cpu][hash_tage1].tag == ip) ? 1 : 0));
+                    break;
+            case 3: alt_pred = (tage_table_2[cpu][hash_tage2].tag == ip) ? 2 : ( (tage_table_1[cpu][hash_tage1].tag == ip) ? 1 : 0);
+                    break;
+            case 2: alt_pred = (tage_table_1[cpu][hash_tage1].tag == ip) ? 1 : 0;
+                    break;
+            case 1: alt_pred = 0;
+                    break;
+        }
+    }
+
+    if (pred == 0)
+        return base_prediction;
+    else
+        return tage_prediction;
+}
+
+uint8_t check_prediction(uint64_t ip, uint8_t taken, unsigned int pred_comp, int cpu) {
+
+    unsigned int hash = 0;
+    uint8_t checker;
+    uint8_t base_prediction;
+    uint8_t tage_prediction;
+	switch(pred_comp)
+    {
+        case 0: hash = ip % BIMODAL_PRIME;
+                base_prediction = (bimodal_table[cpu][hash] >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (base_prediction == taken) ? 1 : 0; 
+                break;
+        
+        case 1: hash = tage_table_hash(ip, 1);
+                tage_prediction = (tage_table_1[cpu][hash].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (tage_prediction == taken) ? 1 : 0; 
+                break;
+
+        case 2: hash = tage_table_hash(ip, 2);
+                tage_prediction = (tage_table_2[cpu][hash].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (tage_prediction == taken) ? 1 : 0; 
+                break;
+
+        case 3: hash = tage_table_hash(ip, 3);
+                tage_prediction = (tage_table_3[cpu][hash].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (tage_prediction == taken) ? 1 : 0; 
+                break;
+
+        case 4: hash = tage_table_hash(ip, 4);
+                tage_prediction = (tage_table_4[cpu][hash].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (tage_prediction == taken) ? 1 : 0; 
+                break;
+
+        case 5: hash = tage_table_hash(ip, 5);
+                tage_prediction = (tage_table_5[cpu][hash].pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+                checker = (tage_prediction == taken) ? 1 : 0; 
+                break;
+    }
+
+    return checker;
+
+}
+
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
+{   
+    unsigned int hash;
+    uint8_t check_pred = check_prediction(ip, taken, pred, cpu);
+    switch(pred)
+    {
+        case 0: hash = ip % BIMODAL_PRIME;
+                if (taken && (bimodal_table[cpu][hash] < MAX_COUNTER))
+                    bimodal_table[cpu][hash]++;
+                else if ((taken == 0) && (bimodal_table[cpu][hash] > 0))
+                    bimodal_table[cpu][hash]--;
+                break;
+        
+        case 1: hash = tage_table_hash(ip, 1);
+                if (taken && (tage_table_1[cpu][hash].pred < MAX_COUNTER))
+                    tage_table_1[cpu][hash].pred++;
+                else if ((taken == 0) && (tage_table_1[cpu][hash].pred > 0))
+                    tage_table_1[cpu][hash].pred--;
+                provider = &tage_table_1[cpu][hash];                 
+                break;
+
+        case 2: hash = tage_table_hash(ip, 2);
+                if (taken && (tage_table_2[cpu][hash].pred < MAX_COUNTER))
+                    tage_table_2[cpu][hash].pred++;
+                else if ((taken == 0) && (tage_table_2[cpu][hash].pred > 0))
+                    tage_table_2[cpu][hash].pred--;
+                provider = &tage_table_2[cpu][hash];                 
+                break;
+
+        case 3: hash = tage_table_hash(ip, 3);
+                if (taken && (tage_table_3[cpu][hash].pred < MAX_COUNTER))
+                    tage_table_3[cpu][hash].pred++;
+                else if ((taken == 0) && (tage_table_3[cpu][hash].pred > 0))
+                    tage_table_3[cpu][hash].pred--;
+                provider = &tage_table_3[cpu][hash];                 
+                break;
+
+        case 4: hash = tage_table_hash(ip, 4);
+                if (taken && (tage_table_4[cpu][hash].pred < MAX_COUNTER))
+                    tage_table_4[cpu][hash].pred++;
+                else if ((taken == 0) && (tage_table_4[cpu][hash].pred > 0))
+                    tage_table_4[cpu][hash].pred--;
+                provider = &tage_table_4[cpu][hash];                 
+                break;
+
+        case 5: hash = tage_table_hash(ip, 5);
+                if (taken && (tage_table_5[cpu][hash].pred < MAX_COUNTER))
+                    tage_table_5[cpu][hash].pred++;
+                else if ((taken == 0) && (tage_table_5[cpu][hash].pred > 0))
+                    tage_table_5[cpu][hash].pred--;
+                provider = &tage_table_5[cpu][hash];                 
+                break;
+    }
+
+
+    //Updating the usefullness counter
+    switch(alt_pred)
+    {
+        case 4: hash = tage_table_hash(ip, 4);
+                alt_provider = &tage_table_4[cpu][hash];                 
+                break;
+
+        case 3: hash = tage_table_hash(ip, 3);
+                alt_provider = &tage_table_3[cpu][hash];                 
+                break;
+
+        case 2: hash = tage_table_hash(ip, 2);
+                alt_provider = &tage_table_2[cpu][hash];                 
+                break;
+
+        case 1: hash = tage_table_hash(ip, 1);
+                alt_provider = &tage_table_1[cpu][hash];                 
+                break;
+    }
+    
+    if(pred != 0){
+        uint8_t temp_prediction = (provider->pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+        uint8_t temp_alt_prediction;
+        if(alt_pred != 0) {
+            temp_alt_prediction = (alt_provider->pred >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+        } else {
+            hash = ip % BIMODAL_PRIME;
+            temp_alt_prediction = (bimodal_table[cpu][hash] >= ((MAX_COUNTER + 1)/2)) ? 1 : 0;
+        }
+        if(temp_prediction != temp_alt_prediction){
+            if(check_pred){
+                if(provider->uctr < MAX_COUNTER)
+                    provider->uctr++; 
+            } else{
+                if(provider->uctr > 0)
+                    provider->uctr--; 
+            }
+        }
+    }
+
+    if(check_pred == 0) {
+        if(pred != 5){ //allocate new entry
+            unsigned int temphash5, temphash4, temphash3, temphash2, temphash1;
+            temphash5 = tage_table_hash(ip, 5);
+            temphash4 = tage_table_hash(ip, 4);
+            temphash3 = tage_table_hash(ip, 3);
+            temphash2 = tage_table_hash(ip, 2);
+            temphash1 = tage_table_hash(ip, 1);
+            switch(pred)
+            {   
+                case 4: if (tage_table_5[cpu][temphash5].uctr == 0 ){
+                            tage_table_5[cpu][temphash5].tag = ip;
+                            tage_table_5[cpu][temphash5].pred = 2;
+                        } else {
+                            tage_table_5[cpu][temphash5].uctr--;
+                        }
+                        break;
+                 
+                case 3: if (tage_table_4[cpu][temphash4].uctr == 0 ){
+                            tage_table_4[cpu][temphash4].tag = ip;
+                            tage_table_4[cpu][temphash4].pred = 2;
+                        } else if (tage_table_5[cpu][temphash5].uctr == 0){
+                            tage_table_5[cpu][temphash5].tag = ip;
+                            tage_table_5[cpu][temphash5].pred = 2;
+                        } else {
+                            tage_table_5[cpu][temphash5].uctr--;
+                            tage_table_4[cpu][temphash4].uctr--;
+                        }
+                        break;
+                      
+                case 2: if (tage_table_3[cpu][temphash3].uctr == 0 ){
+                            tage_table_3[cpu][temphash3].tag = ip;
+                            tage_table_3[cpu][temphash3].pred = 2;
+                        } else if (tage_table_4[cpu][temphash4].uctr == 0){
+                            tage_table_4[cpu][temphash4].tag = ip;
+                            tage_table_4[cpu][temphash4].pred = 2;
+                        } else if (tage_table_5[cpu][temphash5].uctr == 0){
+                            tage_table_5[cpu][temphash5].tag = ip;
+                            tage_table_5[cpu][temphash5].pred = 2;
+                        } else {
+                            tage_table_5[cpu][temphash5].uctr--;
+                            tage_table_4[cpu][temphash4].uctr--;
+                            tage_table_3[cpu][temphash3].uctr--;
+                        }
+                        break;
+                
+                case 1: if (tage_table_2[cpu][temphash2].uctr == 0 ){
+                            tage_table_2[cpu][temphash2].tag = ip;
+                            tage_table_2[cpu][temphash2].pred = 2;
+                        } else if (tage_table_3[cpu][temphash3].uctr == 0 ){
+                            tage_table_3[cpu][temphash3].tag = ip;
+                            tage_table_3[cpu][temphash3].pred = 2;
+                        } else if (tage_table_4[cpu][temphash4].uctr == 0){
+                            tage_table_4[cpu][temphash4].tag = ip;
+                            tage_table_4[cpu][temphash4].pred = 2;
+                        } else if (tage_table_5[cpu][temphash5].uctr == 0){
+                            tage_table_5[cpu][temphash5].tag = ip;
+                            tage_table_5[cpu][temphash5].pred = 2;
+                        } else {
+                            tage_table_5[cpu][temphash5].uctr--;
+                            tage_table_4[cpu][temphash4].uctr--;
+                            tage_table_3[cpu][temphash3].uctr--;
+                            tage_table_2[cpu][temphash2].uctr--;
+                        }
+                        break;
+                
+                case 0: if (tage_table_1[cpu][temphash1].uctr == 0 ){
+                            tage_table_1[cpu][temphash1].tag = ip;
+                            tage_table_1[cpu][temphash1].pred = 2;
+                        } else if (tage_table_2[cpu][temphash2].uctr == 0 ){
+                            tage_table_2[cpu][temphash2].tag = ip;
+                            tage_table_2[cpu][temphash2].pred = 2;
+                        } else if (tage_table_3[cpu][temphash3].uctr == 0 ){
+                            tage_table_3[cpu][temphash3].tag = ip;
+                            tage_table_3[cpu][temphash3].pred = 2;
+                        } else if (tage_table_4[cpu][temphash4].uctr == 0){
+                            tage_table_4[cpu][temphash4].tag = ip;
+                            tage_table_4[cpu][temphash4].pred = 2;
+                        } else if (tage_table_5[cpu][temphash5].uctr == 0){
+                            tage_table_5[cpu][temphash5].tag = ip;
+                            tage_table_5[cpu][temphash5].pred = 2;
+                        } else {
+                            tage_table_5[cpu][temphash5].uctr--;
+                            tage_table_4[cpu][temphash4].uctr--;
+                            tage_table_3[cpu][temphash3].uctr--;
+                            tage_table_2[cpu][temphash2].uctr--;
+                            tage_table_1[cpu][temphash1].uctr--;
+                        }
+                        break;
+            }
+
+        }   
+    }
+}
