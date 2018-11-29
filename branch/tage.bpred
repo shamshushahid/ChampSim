@@ -44,7 +44,8 @@ unsigned int alt_pred = 0; //alternative provider component
 
 tage_entry *provider;
 tage_entry *alt_provider;
-
+unsigned int uctr_clock;
+unsigned int uctr_clock_bit;
 
 //--------Tage Data Structs End-------------------
 
@@ -139,7 +140,6 @@ void O3_CPU::initialize_branch_predictor()
         tage_table_5[cpu][i].pred = 0;
         tage_table_5[cpu][i].tag = 0;
         tage_table_5[cpu][i].uctr = 0;
-
 	}
 
     compressed_hist1 = 0;
@@ -148,10 +148,13 @@ void O3_CPU::initialize_branch_predictor()
     compressed_hist4 = 0;
     compressed_hist5 = 0;
     
+    uctr_clock = 0;
+    uctr_clock_bit = 1;
     cout << "CPU " << cpu << " TAGE branch predictor initialization done" << endl;
-    cout << "Table 1 pred, tag, uctr values = " << tage_table_1[cpu][0].pred  << ", " << tage_table_1[cpu][0].tag << ", " << tage_table_1[cpu][0].uctr << endl;
-    cout << "history initialization check, global_history " << global_history << endl;
-
+    //cout << "Table 1 pred, tag, uctr values = " << tage_table_1[cpu][0].pred  << ", " << tage_table_1[cpu][0].tag << ", " << tage_table_1[cpu][0].uctr << endl;
+    //cout << "history initialization check, global_history " << global_history << endl;
+    
+    
 }
 
 uint8_t O3_CPU::predict_branch(uint64_t ip)
@@ -252,6 +255,9 @@ void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
 {   
     unsigned int hash;
     uint8_t check_pred = check_prediction(ip, taken, pred, cpu);
+    global_history <<= 1;
+    global_history |= taken;
+    update_compressed_history(taken);
     switch(pred)
     {
         case 0: hash = ip % BIMODAL_PRIME;
@@ -300,6 +306,31 @@ void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
                     tage_table_5[cpu][hash].pred--;
                 provider = &tage_table_5[cpu][hash];                 
                 break;
+    }
+
+    uctr_clock++;
+    if (uctr_clock == 256*1024) {
+        if (uctr_clock_bit == 1){
+            //MSB            
+            for(int i = 0; i < TAGE_TABLE_SIZE; i++){
+                tage_table_1[cpu][i].uctr &= 1;
+                tage_table_2[cpu][i].uctr &= 1;
+                tage_table_3[cpu][i].uctr &= 1;
+                tage_table_4[cpu][i].uctr &= 1;
+                tage_table_5[cpu][i].uctr &= 1;
+	        }
+            uctr_clock_bit = 0;
+        } else { //LSB
+            for(int i = 0; i < TAGE_TABLE_SIZE; i++){
+                tage_table_1[cpu][i].uctr &= 2;
+                tage_table_2[cpu][i].uctr &= 2;
+                tage_table_3[cpu][i].uctr &= 2;
+                tage_table_4[cpu][i].uctr &= 2;
+                tage_table_5[cpu][i].uctr &= 2;
+	        }
+            uctr_clock_bit = 1;
+        }
+        uctr_clock = 0;
     }
 
 
